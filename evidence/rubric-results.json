@@ -27,7 +27,7 @@
   {
     "id": 6,
     "passed": false,
-    "reason": "Renew paths install deferred Post hook with `_ = p.hookManager.Post(ctx)`, so a post-hook error is discarded instead of returned to the renewal caller."
+    "reason": "续期函数以延迟清理方式调用 Post hook 并丢弃返回错误，调用方收不到该失败"
   },
   {
     "id": 7,
