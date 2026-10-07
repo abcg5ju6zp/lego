@@ -92,6 +92,22 @@ func (h *Manager) Deploy(ctx context.Context, certRes *certificate.Resource, opt
 	addCertificateMetadata(h.metadata, certRes.ID, certRes.Domains, certRes.KeyType)
 	addCertificatePathsMetadata(h.metadata, certRes, h.certsStorage, options)
 
+	return h.launchDeploy(ctx)
+}
+
+// DeployWith runs the deploy-hook if defined, using the supplied metadata
+// (typically reconstructed from a candidate generation).
+func (h *Manager) DeployWith(ctx context.Context, certRes *certificate.Resource, metadata map[string]string) error {
+	if h.deploy == nil || h.deploy.Cmd == "" {
+		return nil
+	}
+
+	maps.Copy(h.metadata, metadata)
+
+	return h.launchDeploy(ctx)
+}
+
+func (h *Manager) launchDeploy(ctx context.Context) error {
 	err := Launch(ctx, h.deploy.Cmd, h.deploy.Timeout, h.metadata)
 	if err != nil {
 		log.Error("Deploy hook.", log.ErrorAttr(err))
@@ -100,6 +116,17 @@ func (h *Manager) Deploy(ctx context.Context, certRes *certificate.Resource, opt
 	}
 
 	return nil
+}
+
+// BuildDeployMetadata builds the metadata exposed to a deploy hook:
+// the certificate metadata and the paths of the saved files.
+func BuildDeployMetadata(certRes *certificate.Resource, certsStorage *storage.CertificatesStorage, options *storage.SaveOptions) map[string]string {
+	metadata := make(map[string]string)
+
+	addCertificateMetadata(metadata, certRes.ID, certRes.Domains, certRes.KeyType)
+	addCertificatePathsMetadata(metadata, certRes, certsStorage, options)
+
+	return metadata
 }
 
 // Post runs the post-hook if defined.

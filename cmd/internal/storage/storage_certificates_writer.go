@@ -105,37 +105,46 @@ func (s *CertificatesStorage) writeCertificateFiles(certRes *Certificate, opts *
 }
 
 func (s *CertificatesStorage) writePFXFile(certRes *Certificate, password, format string) error {
+	pfxBytes, err := buildPFX(certRes, &SaveOptions{PFXPassword: password, PFXFormat: format})
+	if err != nil {
+		return err
+	}
+
+	return s.writeFile(certRes.ID, ExtPFX, pfxBytes)
+}
+
+func buildPFX(certRes *Certificate, opts *SaveOptions) ([]byte, error) {
 	certPemBlock, _ := pem.Decode(certRes.Certificate)
 	if certPemBlock == nil {
-		return fmt.Errorf("unable to parse certificate %q", certRes.ID)
+		return nil, fmt.Errorf("unable to parse certificate %q", certRes.ID)
 	}
 
 	cert, err := x509.ParseCertificate(certPemBlock.Bytes)
 	if err != nil {
-		return fmt.Errorf("unable to load certificate %q: %w", certRes.ID, err)
+		return nil, fmt.Errorf("unable to load certificate %q: %w", certRes.ID, err)
 	}
 
 	certChain, err := getCertificateChain(certRes)
 	if err != nil {
-		return fmt.Errorf("unable to get certificate chain %q: %w", certRes.ID, err)
+		return nil, fmt.Errorf("unable to get certificate chain %q: %w", certRes.ID, err)
 	}
 
 	privateKey, err := certcrypto.ParsePEMPrivateKey(certRes.PrivateKey)
 	if err != nil {
-		return fmt.Errorf("unable to parse private ky %q: %w", certRes.ID, err)
+		return nil, fmt.Errorf("unable to parse private ky %q: %w", certRes.ID, err)
 	}
 
-	encoder, err := certcrypto.GetPKCS12Encoder(format)
+	encoder, err := certcrypto.GetPKCS12Encoder(opts.PFXFormat)
 	if err != nil {
-		return fmt.Errorf("PFX encoder: %w", err)
+		return nil, fmt.Errorf("PFX encoder: %w", err)
 	}
 
-	pfxBytes, err := encoder.Encode(privateKey, cert, certChain, password)
+	pfxBytes, err := encoder.Encode(privateKey, cert, certChain, opts.PFXPassword)
 	if err != nil {
-		return fmt.Errorf("unable to encode PFX data %q: %w", certRes.ID, err)
+		return nil, fmt.Errorf("unable to encode PFX data %q: %w", certRes.ID, err)
 	}
 
-	return s.writeFile(certRes.ID, ExtPFX, pfxBytes)
+	return pfxBytes, nil
 }
 
 func (s *CertificatesStorage) writeFile(domain, extension string, data []byte) error {
