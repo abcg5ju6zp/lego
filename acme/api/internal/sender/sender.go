@@ -1,6 +1,7 @@
 package sender
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,12 @@ import (
 )
 
 type RequestOption func(*http.Request) error
+
+// EmptyBodyAcceptor marks a response object that explicitly accepts a successful
+// HTTP response with an empty body, instead of failing to unmarshal it as JSON.
+type EmptyBodyAcceptor interface {
+	AcceptEmptyBody()
+}
 
 func contentType(ct string) RequestOption {
 	return func(req *http.Request) error {
@@ -104,6 +111,12 @@ func (d *Doer) do(req *http.Request, response any) (*http.Response, error) {
 		raw, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return resp, errutils.NewReadResponseError(req, resp.StatusCode, err)
+		}
+
+		if len(bytes.TrimSpace(raw)) == 0 {
+			if _, ok := response.(EmptyBodyAcceptor); ok {
+				return resp, nil
+			}
 		}
 
 		err = json.Unmarshal(raw, response)

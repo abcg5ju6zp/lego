@@ -95,24 +95,42 @@ func (a *AccountService) Deactivate(ctx context.Context, accountURL string) erro
 }
 
 // KeyChange Changes the account key.
+// It returns the Account object sent back by the server.
+// Callers SHOULD verify that this account is consistent with the current registration
+// (e.g. the account status and the account-specific URLs) before persisting the new key locally.
 // https://www.rfc-editor.org/rfc/rfc8555.html#section-7.3.5
-func (a *AccountService) KeyChange(ctx context.Context, newKey crypto.Signer) error {
+func (a *AccountService) KeyChange(ctx context.Context, newKey crypto.Signer) (acme.Account, error) {
 	uri := a.core.GetDirectory().KeyChangeURL
+	if uri == "" {
+		return acme.Account{}, errors.New("account[key-change]: the server directory does not expose a keyChange URL")
+	}
 
 	eabJWS, err := a.core.signer().SignKeyChange(uri, newKey)
 	if err != nil {
-		return err
+		return acme.Account{}, err
 	}
 
-	_, err = a.core.retrievablePost(ctx, uri, []byte(eabJWS.FullSerialize()), nil)
+	var response keyChangeAccount
+
+	_, err = a.core.retrievablePost(ctx, uri, []byte(eabJWS.FullSerialize()), &response)
 	if err != nil {
-		return err
+		return acme.Account{}, err
 	}
 
 	a.core.setPrivateKey(newKey)
 
-	return nil
+	return response.Account, nil
 }
+
+// keyChangeAccount accepts an empty JSON response body:
+// RFC 8555 requires the Account object, but some compliant servers (e.g. Pebble)
+// answer a successful key change with an empty 200 response.
+type keyChangeAccount struct {
+	acme.Account
+}
+
+// AcceptEmptyBody implements sender.EmptyBodyAcceptor.
+func (a *keyChangeAccount) AcceptEmptyBody() {}
 
 func decodeEABHmac(hmacEncoded string) ([]byte, error) {
 	hmac, errRaw := base64.RawURLEncoding.DecodeString(hmacEncoded)

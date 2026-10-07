@@ -1,0 +1,16 @@
+项目：go-acme-lego｜题目 ID：go-acme-lego-f73a1b5f-5671-4810-b223-4204e5ef6c97
+固定基线：4f00c959d650c055c697d3662e0dccf93c4eb7d0｜Session：586499748533644:dda1332d11c0f7093eedf0f850a60767_6ac5ead4419aca978daa0331.6ac5ead4419aca978daa0334.6ac5ead4419aca978daa0332:TraeCode CN.3.3.104.no_sid.no_ppe.T(2026/10/7 14:46:44)
+Harness：Trae｜有效轮数：131｜来源：count-trae-cn-steps.py｜范围：latest_turn
+完成度：完成｜收录结论：收录：长程题
+验证命令：go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+
+Rubric ID：1｜状态：通过｜期望行为：轮换开始会持久记录旧密钥、新密钥和账户 URL 的唯一代际。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：cmd/cmd_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover_test.go；go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+Rubric ID：2｜状态：通过｜期望行为：远端 keyChange 成功且返回账户一致后才允许写入并确认本地新密钥。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：cmd/cmd_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover_test.go；go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+Rubric ID：3｜状态：通过｜期望行为：网络、解析、权限或进程失败时旧密钥仍能完成现有签名，候选不会被误读。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：cmd/cmd_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover_test.go；go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+Rubric ID：4｜状态：通过｜期望行为：重启会继续未确认轮换或清理候选，账户不会停在无法判断的状态。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：cmd/cmd_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover_test.go；go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+Rubric ID：5｜状态：通过｜期望行为：重复请求会复用已确认轮换结果，不重复调用远端 keyChange。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：cmd/cmd_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover_test.go；go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+Rubric ID：6｜状态：通过｜期望行为：旧密钥只在确认后归档或清理，其他账户的 kid、EAB 和 signer 不受影响。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：cmd/cmd_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover_test.go；go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+Rubric ID：7｜状态：通过｜期望行为：Register、QueryRegistration、EAB 和普通账户读写行为保持通过。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：cmd/cmd_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover.go; cmd/internal/storage/storage_accounts_keyrollover_test.go；go test -count=1 ./cmd/internal/storage ./cmd ./registration ./acme/api ./acme/api/internal/sender
+
+Prompt-Rubric 对齐：冻结 Prompt 已拆分为入口、状态、失败恢复、重启、并发和兼容性要求；每条 Rubric 均可回指原始 Prompt，未增加接口、文件、错误码、性能或部署条件。
+审计边界：仅使用本题固定版本、一次 Session、冻结 Rubric 和当前项目改动；未使用其他题目、其他 Session 或重跑材料替代原始运行事实。

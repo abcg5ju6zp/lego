@@ -171,7 +171,25 @@ func (r *Registrar) ResolveAccountByKey(ctx context.Context) (*acme.ExtendedAcco
 }
 
 // KeyRollover will attempt to change the account key.
+//
+// It only performs the remote key change (and updates the in-memory key used by the client):
+// callers are responsible for persisting the new key durably.
+// Callers that need to validate the account returned by the server should use KeyRolloverResult.
 func (r *Registrar) KeyRollover(ctx context.Context, newKey crypto.Signer) error {
+	_, err := r.KeyRolloverResult(ctx, newKey)
+
+	return err
+}
+
+// KeyRolloverResult will attempt to change the account key
+// and returns the Account object sent back by the server,
+// so the caller can check its consistency with the current registration
+// before committing the new key to its own storage.
+func (r *Registrar) KeyRolloverResult(ctx context.Context, newKey crypto.Signer) (acme.Account, error) {
+	if r == nil || r.user == nil {
+		return acme.Account{}, errors.New("acme: cannot change the key of a nil client or user")
+	}
+
 	return r.core.Accounts.KeyChange(ctx, newKey)
 }
 

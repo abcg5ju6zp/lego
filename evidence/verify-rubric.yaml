@@ -1,0 +1,22 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "轮换开始会持久记录旧密钥、新密钥和账户 URL 的唯一代际。"
+  - id: 2
+    type: f2p
+    text: "远端 keyChange 成功且返回账户一致后才允许写入并确认本地新密钥。"
+  - id: 3
+    type: f2p
+    text: "网络、解析、权限或进程失败时旧密钥仍能完成现有签名，候选不会被误读。"
+  - id: 4
+    type: f2p
+    text: "重启会继续未确认轮换或清理候选，账户不会停在无法判断的状态。"
+  - id: 5
+    type: f2p
+    text: "重复请求会复用已确认轮换结果，不重复调用远端 keyChange。"
+  - id: 6
+    type: p2p
+    text: "旧密钥只在确认后归档或清理，其他账户的 kid、EAB 和 signer 不受影响。"
+  - id: 7
+    type: p2p
+    text: "Register、QueryRegistration、EAB 和普通账户读写行为保持通过。"

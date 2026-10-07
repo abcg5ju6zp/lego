@@ -112,7 +112,7 @@ func (s *AccountsStorage) Save(account *Account) error {
 		return fmt.Errorf("create the directory %q for the account: %w", filepath.Dir(accountFilePath), err)
 	}
 
-	return os.WriteFile(accountFilePath, jsonBytes, filePerm)
+	return writeFileAtomic(accountFilePath, jsonBytes)
 }
 
 // SavePrivateKey saves the private key to a file defined by the account.
@@ -319,7 +319,7 @@ func (s *AccountsStorage) getRootUserPath(server *url.URL, effectiveAccountID st
 }
 
 func savePrivateKey(filename string, privateKey crypto.Signer) error {
-	err := os.WriteFile(filename, pem.EncodeToMemory(certcrypto.PEMBlock(privateKey)), filePerm)
+	err := writeFileAtomic(filename, pem.EncodeToMemory(certcrypto.PEMBlock(privateKey)))
 	if err != nil {
 		return fmt.Errorf("PEM encoding: %w", err)
 	}
