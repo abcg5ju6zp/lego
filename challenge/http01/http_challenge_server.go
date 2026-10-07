@@ -10,6 +10,7 @@ import (
 	"net/textproto"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-acme/lego/v5/challenge"
@@ -26,18 +27,34 @@ type Options struct {
 	ProxyHeaderName string
 }
 
+// challengeEntry holds the details of a single HTTP-01 authorization
+// currently hosted by the server.
+type challengeEntry struct {
+	domain  string
+	keyAuth string
+}
+
 // ProviderServer implements ChallengeProvider for `http-01` challenge.
 // It may be instantiated without using the NewProviderServer function if
 // you want only to use the default values.
+//
+// A single ProviderServer can host the tokens of several authorizations at
+// the same time: the HTTP listener is started by the first Present call and
+// is only closed once the last authorization has been cleaned up.
 type ProviderServer struct {
 	network string // must be valid argument to net.Listen
 	address string
 
 	socketMode fs.FileMode
 
-	matcher  domainMatcher
-	done     chan bool
+	matcher domainMatcher
+
+	mu       sync.Mutex
+	tokens   map[string]challengeEntry
 	listener net.Listener
+
+	// done is closed when the goroutine running the shared HTTP server exits.
+	done chan struct{}
 }
 
 // NewProviderServerWithOptions creates a new ProviderServer.
@@ -78,45 +95,103 @@ func NewUnixProviderServer(socketPath string, socketMode fs.FileMode) *ProviderS
 	})
 }
 
-// Present starts a web server and makes the token available at `ChallengePath(token)` for web requests.
+// Present starts the shared web server (for the first authorization only)
+// and makes the token available at `ChallengePath(token)` for web requests.
+// Subsequent calls only register the additional token, they do not replace
+// the challenges hosted for the other authorizations.
 func (s *ProviderServer) Present(ctx context.Context, domain, token, keyAuth string) error {
-	var err error
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	var lc net.ListenConfig
-
-	s.listener, err = lc.Listen(ctx, s.network, s.GetAddress())
-	if err != nil {
-		return fmt.Errorf("could not start HTTP server for challenge: %w", err)
-	}
-
-	if s.network == "unix" {
-		if err = os.Chmod(s.address, s.socketMode); err != nil {
-			return fmt.Errorf("chmod %s: %w", s.address, err)
+	if s.listener == nil {
+		err := s.start(context.WithoutCancel(ctx))
+		if err != nil {
+			return err
 		}
 	}
 
-	s.done = make(chan bool)
-
-	go s.serve(domain, token, keyAuth)
+	s.tokens[token] = challengeEntry{domain: domain, keyAuth: keyAuth}
 
 	return nil
 }
 
-// CleanUp closes the HTTP server and removes the token from `ChallengePath(token)`.
-func (s *ProviderServer) CleanUp(ctx context.Context, domain, token, keyAuth string) error {
+// CleanUp removes the token from `ChallengePath(token)`.
+// It only affects the authorization it is called for: the shared HTTP server
+// keeps serving the other authorizations and is stopped once the last token
+// has been removed.
+func (s *ProviderServer) CleanUp(_ context.Context, _, token, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.listener == nil {
 		return nil
 	}
 
-	s.listener.Close()
+	// A CleanUp call must only remove its own token:
+	// an unknown token (for example a failed or already cleaned up
+	// authorization) must not tear down the server of other authorizations.
+	if _, ok := s.tokens[token]; !ok {
+		return nil
+	}
 
-	<-s.done
+	delete(s.tokens, token)
+
+	if len(s.tokens) > 0 {
+		return nil
+	}
+
+	// The last authorization is done, stop the shared server.
+	// The mutex stays locked until the server is fully stopped,
+	// so a concurrent Present cannot bind the address before it is released,
+	// and it can restart a fresh server afterwards.
+	listener := s.listener
+	done := s.done
+
+	s.listener = nil
+	s.done = nil
+	s.tokens = nil
+
+	if err := listener.Close(); err != nil {
+		return fmt.Errorf("close HTTP-01 challenge listener: %w", err)
+	}
+
+	<-done
 
 	return nil
 }
 
 func (s *ProviderServer) GetAddress() string {
 	return s.address
+}
+
+// start binds the shared listener and launches the HTTP serving goroutine.
+// The context is intentionally detached from the caller: the listener is
+// shared between all the presented authorizations, so canceling the context
+// of a single authorization must not close it while other challenges are
+// still being validated.
+func (s *ProviderServer) start(ctx context.Context) error {
+	var lc net.ListenConfig
+
+	listener, err := lc.Listen(ctx, s.network, s.GetAddress())
+	if err != nil {
+		return fmt.Errorf("could not start HTTP server for challenge: %w", err)
+	}
+
+	if s.network == "unix" {
+		if err = os.Chmod(s.address, s.socketMode); err != nil {
+			_ = listener.Close()
+
+			return fmt.Errorf("chmod %s: %w", s.address, err)
+		}
+	}
+
+	s.listener = listener
+	s.tokens = make(map[string]challengeEntry)
+	s.done = make(chan struct{})
+
+	go s.serve(listener, s.done)
+
+	return nil
 }
 
 // getMatcher gets the matcher for incoming requests.
@@ -142,40 +217,14 @@ func getMatcher(proxyHeaderName string) domainMatcher {
 	}
 }
 
-func (s *ProviderServer) serve(domain, token, keyAuth string) {
-	path := ChallengePath(token)
+func (s *ProviderServer) serve(listener net.Listener, done chan<- struct{}) {
+	defer close(done)
 
-	// The incoming request will be validated to prevent DNS rebind attacks.
-	// We only respond with the keyAuth, when we're receiving a GET requests with
-	// the "Host" header matching the domain (the latter is configurable though SetProxyHeader).
+	// A single mux serves every hosted token:
+	// the handler selects the key authorization from the request path
+	// and validates the request domain to prevent DNS rebind attacks.
 	mux := http.NewServeMux()
-	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && s.matcher.matches(r, domain) {
-			w.Header().Set("Content-Type", "text/plain")
-
-			_, err := w.Write([]byte(keyAuth))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			log.Debug("Served key authentication.", log.DomainAttr(domain))
-
-			return
-		}
-
-		log.Warn("http01: Received request but the domain did not match any challenge. Please ensure you are passing the header properly.",
-			log.DomainAttr(r.Host),
-			slog.String("method", r.Method),
-			slog.String("header", s.matcher.name()),
-		)
-
-		_, err := w.Write([]byte("TEST"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
+	mux.HandleFunc(PathPrefix, s.handleChallenge)
 
 	httpServer := &http.Server{
 		Handler:           mux,
@@ -189,10 +238,53 @@ func (s *ProviderServer) serve(domain, token, keyAuth string) {
 	// we don't want any lingering connections, so disable KeepAlives.
 	httpServer.SetKeepAlivesEnabled(false)
 
-	err := httpServer.Serve(s.listener)
+	err := httpServer.Serve(listener)
 	if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 		log.Warn("http01: HTTP server serve.", log.ErrorAttr(err))
 	}
+}
 
-	s.done <- true
+func (s *ProviderServer) handleChallenge(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, PathPrefix)
+
+	s.mu.Lock()
+	entry, found := s.tokens[token]
+	s.mu.Unlock()
+
+	// Unknown tokens get the default "not found" response,
+	// matching the historical behavior where only the presented token path
+	// was registered on the mux.
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+
+	// The incoming request will be validated to prevent DNS rebind attacks.
+	// We only respond with the keyAuth, when we're receiving a GET requests with
+	// the "Host" header matching the domain (the latter is configurable though SetProxyHeader).
+	if r.Method == http.MethodGet && s.matcher.matches(r, entry.domain) {
+		w.Header().Set("Content-Type", "text/plain")
+
+		_, err := w.Write([]byte(entry.keyAuth))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Debug("Served key authentication.", log.DomainAttr(entry.domain))
+
+		return
+	}
+
+	log.Warn("http01: Received request but the domain did not match any challenge. Please ensure you are passing the header properly.",
+		log.DomainAttr(r.Host),
+		slog.String("method", r.Method),
+		slog.String("header", s.matcher.name()),
+	)
+
+	_, err := w.Write([]byte("TEST"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }

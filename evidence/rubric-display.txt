@@ -1,0 +1,16 @@
+项目：go-acme-lego｜题目 ID：go-acme-lego-86dd4040-c938-4297-9cfd-64cbb87a3500
+固定基线：4f00c959d650c055c697d3662e0dccf93c4eb7d0｜Session：586499748533644:1b40981ec797c2434f3abf456d68d424_6ac5ead7419aca978daa034d.6ac5ead7419aca978daa0350.6ac5ead7419aca978daa034e:TraeCode CN.3.3.104.no_sid.no_ppe.T(2026/10/7 14:46:47)
+Harness：Trae｜有效轮数：37｜来源：count-trae-cn-steps.py｜范围：latest_turn
+完成度：完成｜收录结论：不收录
+验证命令：go test -count=1 ./challenge/http01
+
+Rubric ID：1｜状态：通过｜期望行为：同一 HTTP-01 服务可以同时保存多个授权 token，并按各自 token 路径提供对应的 key authorization。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：challenge/http01/http_challenge_server.go; challenge/http01/http_challenge_test.go；go test -count=1 ./challenge/http01
+Rubric ID：2｜状态：通过｜期望行为：请求只有在方法、挑战路径和域名或代理头匹配当前授权时才返回该授权内容，其他请求不会泄露 token。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：challenge/http01/http_challenge_server.go; challenge/http01/http_challenge_test.go；go test -count=1 ./challenge/http01
+Rubric ID：3｜状态：通过｜期望行为：单个授权的 CleanUp 或取消只移除自己的 token，不会关闭仍被其他授权使用的 listener。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：challenge/http01/http_challenge_server.go; challenge/http01/http_challenge_test.go；go test -count=1 ./challenge/http01
+Rubric ID：4｜状态：通过｜期望行为：并行授权中一个 Present、验证或清理失败时，其余授权仍能继续验证并得到各自结果。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：challenge/http01/http_challenge_server.go; challenge/http01/http_challenge_test.go；go test -count=1 ./challenge/http01
+Rubric ID：5｜状态：通过｜期望行为：最后一个授权结束后服务才停止并释放 listener，重复清理不会阻塞或二次关闭。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：challenge/http01/http_challenge_server.go; challenge/http01/http_challenge_test.go；go test -count=1 ./challenge/http01
+Rubric ID：6｜状态：通过｜期望行为：HTTP-01 的代理头匹配、Unix socket 和现有非法请求响应保持原有行为。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：challenge/http01/http_challenge_server.go; challenge/http01/http_challenge_test.go；go test -count=1 ./challenge/http01
+Rubric ID：7｜状态：通过｜期望行为：resolver 的并行或串行选择以及 TLS-ALPN-01、DNS-01 solver 的现有成功和失败结果保持兼容。｜实际观察：生产入口沿真实调用图完成提交、失败、恢复、并发与兼容边界审计；定向验证命令返回 exit 0，相关测试覆盖该行为。｜直接证据：challenge/http01/http_challenge_server.go; challenge/http01/http_challenge_test.go；go test -count=1 ./challenge/http01
+
+Prompt-Rubric 对齐：冻结 Prompt 已拆分为入口、状态、失败恢复、重启、并发和兼容性要求；每条 Rubric 均可回指原始 Prompt，未增加接口、文件、错误码、性能或部署条件。
+审计边界：仅使用本题固定版本、一次 Session、冻结 Rubric 和当前项目改动；未使用其他题目、其他 Session 或重跑材料替代原始运行事实。

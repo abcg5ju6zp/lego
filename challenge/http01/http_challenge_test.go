@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/go-acme/lego/v5/acme"
@@ -480,4 +482,393 @@ func TestChallengePath(t *testing.T) {
 			assert.Equal(t, test.expected, path.Clean(ChallengePath(test.token)))
 		})
 	}
+}
+
+// doChallengeRequest performs a GET request for the given token.
+// When host is not empty it overrides the request Host header,
+// and extra headers are added as-is.
+// It returns the response status code and body.
+func doChallengeRequest(t *testing.T, client *http.Client, addr, host, token string, extra ...[2]string) (int, string) {
+	t.Helper()
+
+	uri := "http://" + addr + ChallengePath(token)
+
+	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	require.NoError(t, err)
+
+	if host != "" {
+		req.Host = host
+	}
+
+	for _, header := range extra {
+		req.Header.Set(header[0], header[1])
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, ""
+	}
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return resp.StatusCode, string(body)
+}
+
+func TestProviderServerMultipleTokens(t *testing.T) {
+	const addr = "127.0.0.1:23460"
+
+	providerServer := NewProviderServer("127.0.0.1", "23460")
+
+	ctx := t.Context()
+
+	const (
+		domainA = "example-a.com"
+		tokenA  = "token-a"
+		keyA    = "key-authorization-a"
+
+		domainB = "example-b.com"
+		tokenB  = "token-b"
+		keyB    = "key-authorization-b"
+	)
+
+	require.NoError(t, providerServer.Present(ctx, domainA, tokenA, keyA))
+	require.NoError(t, providerServer.Present(ctx, domainB, tokenB, keyB))
+
+	// Both tokens are served at the same time on the same listener,
+	// the response is selected from the request path and validated against
+	// the request domain.
+	status, body := doChallengeRequest(t, http.DefaultClient, addr, domainA, tokenA)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyA, body)
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	// A path/domain mismatch must not leak another authorization's key auth.
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenA)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "TEST", body)
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainA, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "TEST", body)
+
+	// An unknown token behaves like the historical mux default: 404.
+	status, _ = doChallengeRequest(t, http.DefaultClient, addr, domainA, "unknown-token")
+	assert.Equal(t, http.StatusNotFound, status)
+
+	// Cleaning up the first authorization only removes its own token.
+	require.NoError(t, providerServer.CleanUp(ctx, domainA, tokenA, keyA))
+
+	status, _ = doChallengeRequest(t, http.DefaultClient, addr, domainA, tokenA)
+	assert.Equal(t, http.StatusNotFound, status)
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	// Cleaning up an unknown token must not affect the remaining authorization.
+	require.NoError(t, providerServer.CleanUp(ctx, "example-c.com", "token-c", keyB))
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	// The listener is closed only once the last authorization is cleaned up.
+	require.NoError(t, providerServer.CleanUp(ctx, domainB, tokenB, keyB))
+
+	status, _ = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenB)
+	assert.Equal(t, 0, status)
+
+	// The server can be reused for another order of authorizations.
+	const (
+		domainC = "example-c.com"
+		tokenC  = "token-c"
+		keyC    = "key-authorization-c"
+	)
+
+	require.NoError(t, providerServer.Present(ctx, domainC, tokenC, keyC))
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainC, tokenC)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyC, body)
+
+	require.NoError(t, providerServer.CleanUp(ctx, domainC, tokenC, keyC))
+
+	status, _ = doChallengeRequest(t, http.DefaultClient, addr, domainC, tokenC)
+	assert.Equal(t, 0, status)
+
+	// CleanUp without any presented authorization is a no-op.
+	require.NoError(t, providerServer.CleanUp(ctx, domainC, tokenC, keyC))
+}
+
+func TestProviderServerCancellationIsolation(t *testing.T) {
+	const addr = "127.0.0.1:23461"
+
+	providerServer := NewProviderServer("127.0.0.1", "23461")
+
+	ctxA, cancelA := context.WithCancel(t.Context())
+	ctxB, cancelB := context.WithCancel(t.Context())
+
+	const (
+		domainA = "example-a.com"
+		tokenA  = "token-a"
+		keyA    = "key-authorization-a"
+
+		domainB = "example-b.com"
+		tokenB  = "token-b"
+		keyB    = "key-authorization-b"
+	)
+
+	require.NoError(t, providerServer.Present(ctxA, domainA, tokenA, keyA))
+	require.NoError(t, providerServer.Present(ctxB, domainB, tokenB, keyB))
+
+	// Giving up authorization A must not disturb the shared listener
+	// nor authorization B.
+	cancelA()
+
+	status, body := doChallengeRequest(t, http.DefaultClient, addr, domainA, tokenA)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyA, body)
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	// CleanUp with the already canceled context still only removes token A.
+	require.NoError(t, providerServer.CleanUp(ctxA, domainA, tokenA, keyA))
+
+	status, _ = doChallengeRequest(t, http.DefaultClient, addr, domainA, tokenA)
+	assert.Equal(t, http.StatusNotFound, status)
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	cancelB()
+
+	require.NoError(t, providerServer.CleanUp(ctxB, domainB, tokenB, keyB))
+
+	status, _ = doChallengeRequest(t, http.DefaultClient, addr, domainB, tokenB)
+	assert.Equal(t, 0, status)
+}
+
+func TestProviderServerParallel(t *testing.T) {
+	const (
+		addr = "127.0.0.1:23462"
+		n    = 16
+	)
+
+	providerServer := NewProviderServer("127.0.0.1", "23462")
+
+	var (
+		wg     sync.WaitGroup
+		errMu  sync.Mutex
+		failed bool
+	)
+
+	markFailed := func() {
+		errMu.Lock()
+		failed = true
+		errMu.Unlock()
+	}
+
+	for i := range n {
+		domain := fmt.Sprintf("example-%d.com", i)
+		token := fmt.Sprintf("token-%d", i)
+		keyAuth := fmt.Sprintf("key-authorization-%d", i)
+
+		wg.Go(func() {
+			ctx := t.Context()
+
+			err := providerServer.Present(ctx, domain, token, keyAuth)
+			if err != nil {
+				markFailed()
+				return
+			}
+
+			status, body := doChallengeRequest(t, http.DefaultClient, addr, domain, token)
+			if status != http.StatusOK || body != keyAuth {
+				markFailed()
+			}
+
+			err = providerServer.CleanUp(ctx, domain, token, keyAuth)
+			if err != nil {
+				markFailed()
+			}
+		})
+	}
+
+	wg.Wait()
+
+	assert.False(t, failed, "at least one parallel authorization failed to be served")
+
+	// All authorizations are cleaned up, the shared listener must be closed.
+	status, _ := doChallengeRequest(t, http.DefaultClient, addr, "example-0.com", "token-0")
+	assert.Equal(t, 0, status)
+}
+
+func TestProviderServerMultipleTokensWithProxyHeader(t *testing.T) {
+	const addr = "127.0.0.1:23464"
+
+	providerServer := NewProviderServerWithOptions(Options{
+		Address:         addr,
+		ProxyHeaderName: "X-Forwarded-Host",
+	})
+
+	ctx := t.Context()
+
+	const (
+		domainA = "example-a.com"
+		tokenA  = "token-a"
+		keyA    = "key-authorization-a"
+
+		domainB = "example-b.com"
+		tokenB  = "token-b"
+		keyB    = "key-authorization-b"
+	)
+
+	require.NoError(t, providerServer.Present(ctx, domainA, tokenA, keyA))
+	require.NoError(t, providerServer.Present(ctx, domainB, tokenB, keyB))
+
+	status, body := doChallengeRequest(t, http.DefaultClient, addr, addr, tokenA, [2]string{"X-Forwarded-Host", domainA})
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyA, body)
+
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, addr, tokenB, [2]string{"X-Forwarded-Host", domainB})
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	// The proxy header selects the authorization:
+	// token A presented through B's host must fail the domain check.
+	status, body = doChallengeRequest(t, http.DefaultClient, addr, addr, tokenA, [2]string{"X-Forwarded-Host", domainB})
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "TEST", body)
+
+	require.NoError(t, providerServer.CleanUp(ctx, domainA, tokenA, keyA))
+	require.NoError(t, providerServer.CleanUp(ctx, domainB, tokenB, keyB))
+}
+
+func TestProviderServerMultipleTokensUnix(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only for UNIX systems")
+	}
+
+	dir := t.TempDir()
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	socket := filepath.Join(dir, "lego-challenge-parallel-test.sock")
+
+	providerServer := NewUnixProviderServer(socket, fs.ModeSocket|0o666)
+
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", socket)
+		},
+	}}
+
+	ctx := t.Context()
+
+	const (
+		domainA = "example-a.com"
+		tokenA  = "token-a"
+		keyA    = "key-authorization-a"
+
+		domainB = "example-b.com"
+		tokenB  = "token-b"
+		keyB    = "key-authorization-b"
+	)
+
+	require.NoError(t, providerServer.Present(ctx, domainA, tokenA, keyA))
+	require.NoError(t, providerServer.Present(ctx, domainB, tokenB, keyB))
+
+	// addr/host are ignored by the dialer hijack.
+	status, body := doChallengeRequest(t, client, "localhost", domainA, tokenA)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyA, body)
+
+	status, body = doChallengeRequest(t, client, "localhost", domainB, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	require.NoError(t, providerServer.CleanUp(ctx, domainA, tokenA, keyA))
+
+	status, _ = doChallengeRequest(t, client, "localhost", domainA, tokenA)
+	assert.Equal(t, http.StatusNotFound, status)
+
+	status, body = doChallengeRequest(t, client, "localhost", domainB, tokenB)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, keyB, body)
+
+	require.NoError(t, providerServer.CleanUp(ctx, domainB, tokenB, keyB))
+}
+
+// TestChallengeParallelFailureIsolation ensures that when two HTTP-01
+// authorizations are solved concurrently, a validation failure for one
+// authorization does not prevent the other one from being served and solved.
+func TestChallengeParallelFailureIsolation(t *testing.T) {
+	server := tester.MockACMEServer().BuildHTTPS(t)
+
+	const addr = "127.0.0.1:23463"
+
+	providerServer := NewProviderServer("127.0.0.1", "23463")
+
+	validate := func(_ context.Context, _ *api.Core, domain string, chlng acme.Challenge) error {
+		status, body := doChallengeRequest(t, http.DefaultClient, addr, domain, chlng.Token)
+		if status != http.StatusOK || body != chlng.KeyAuthorization {
+			return fmt.Errorf("unexpected challenge response: status=%d body=%q", status, body)
+		}
+
+		if chlng.Token == "token-fail" {
+			return errors.New("simulated validation failure")
+		}
+
+		return nil
+	}
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err, "Could not generate test key")
+
+	core, err := api.New(server.Client(), "lego-test", server.URL+"/dir", "", privateKey)
+	require.NoError(t, err)
+
+	solver := NewChallenge(core, validate, providerServer)
+
+	authzFail := acme.Authorization{
+		Identifier: acme.Identifier{Value: "example-fail.com"},
+		Challenges: []acme.Challenge{
+			{Type: challenge.HTTP01.String(), Token: "token-fail"},
+		},
+	}
+
+	authzOK := acme.Authorization{
+		Identifier: acme.Identifier{Value: "example-ok.com"},
+		Challenges: []acme.Challenge{
+			{Type: challenge.HTTP01.String(), Token: "token-ok"},
+		},
+	}
+
+	var (
+		wg      sync.WaitGroup
+		errFail error
+		errOK   error
+	)
+
+	wg.Go(func() {
+		errFail = solver.Solve(t.Context(), authzFail)
+	})
+
+	wg.Go(func() {
+		errOK = solver.Solve(t.Context(), authzOK)
+	})
+
+	wg.Wait()
+
+	require.Error(t, errFail)
+	assert.Contains(t, errFail.Error(), "simulated validation failure")
+	assert.NoError(t, errOK)
 }

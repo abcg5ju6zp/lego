@@ -1,0 +1,22 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "同一 HTTP-01 服务可以同时保存多个授权 token，并按各自 token 路径提供对应的 key authorization。"
+  - id: 2
+    type: f2p
+    text: "请求只有在方法、挑战路径和域名或代理头匹配当前授权时才返回该授权内容，其他请求不会泄露 token。"
+  - id: 3
+    type: f2p
+    text: "单个授权的 CleanUp 或取消只移除自己的 token，不会关闭仍被其他授权使用的 listener。"
+  - id: 4
+    type: f2p
+    text: "并行授权中一个 Present、验证或清理失败时，其余授权仍能继续验证并得到各自结果。"
+  - id: 5
+    type: f2p
+    text: "最后一个授权结束后服务才停止并释放 listener，重复清理不会阻塞或二次关闭。"
+  - id: 6
+    type: p2p
+    text: "HTTP-01 的代理头匹配、Unix socket 和现有非法请求响应保持原有行为。"
+  - id: 7
+    type: p2p
+    text: "resolver 的并行或串行选择以及 TLS-ALPN-01、DNS-01 solver 的现有成功和失败结果保持兼容。"
