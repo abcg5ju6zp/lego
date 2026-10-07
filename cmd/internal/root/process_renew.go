@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-acme/lego/v5/acme/api"
 	"github.com/go-acme/lego/v5/certcrypto"
+	"github.com/go-acme/lego/v5/certificate"
 	"github.com/go-acme/lego/v5/cmd/internal/configuration"
 	"github.com/go-acme/lego/v5/cmd/internal/hook"
 	"github.com/go-acme/lego/v5/cmd/internal/storage"
@@ -46,6 +47,23 @@ func (p *renewProcessor) renew(ctx context.Context, certID string, resource *sto
 }
 
 func (p *renewProcessor) renewForDomains(ctx context.Context, certID string, changed bool) error {
+	lease, err := p.certsStorage.LeaseCertificate(ctx, certID)
+	if err != nil {
+		return fmt.Errorf("error while locking the certificate for %q: %w", certID, err)
+	}
+
+	defer lease.Release()
+
+	// Finalize a renewal interrupted during the previous run before doing anything else.
+	recovered, err := lease.Recover(ctx, p.deployHook)
+	if err != nil {
+		return err
+	}
+
+	if recovered {
+		return nil
+	}
+
 	certificates, err := p.certsStorage.ReadCertificate(certID)
 	if err != nil {
 		return fmt.Errorf("error while reading the certificate for %q: %w", certID, err)
@@ -98,16 +116,44 @@ func (p *renewProcessor) renewForDomains(ctx context.Context, certID string, cha
 		request.ReplacesCertID = replacesCertID
 	}
 
-	err = p.hookManager.PreForDomains(ctx, certID, request)
+	// Adopt a fully staged generation instead of issuing a new certificate when possible.
+	generation, err := lease.Adopt(ctx, renewalDomains, request.Profile, p.ocspHook)
 	if err != nil {
-		return fmt.Errorf("pre-renew hook: %w", err)
+		return err
 	}
 
-	defer func() { _ = p.hookManager.Post(ctx) }()
+	if generation == nil {
+		err = p.hookManager.PreForDomains(ctx, certID, request)
+		if err != nil {
+			return fmt.Errorf("pre-renew hook: %w", err)
+		}
 
+		defer func() { _ = p.hookManager.Post(ctx) }()
+
+		generation, err = p.obtainAndStage(ctx, lease, certID, request, certDomains, renewalDomains, changed)
+		if err != nil {
+			return err
+		}
+	} else {
+		defer func() { _ = p.hookManager.Post(ctx) }()
+	}
+
+	// Promote the generation and deploy: on failure the previous certificate stays consistent.
+	return lease.Commit(ctx, generation, p.deployHook)
+}
+
+// obtainAndStage obtains a new certificate and stages a validated candidate generation.
+func (p *renewProcessor) obtainAndStage(
+	ctx context.Context,
+	lease *storage.CertificateLease,
+	certID string,
+	request certificate.ObtainRequest,
+	certDomains, renewalDomains []string,
+	changed bool,
+) (*storage.Generation, error) {
 	client, err := p.lazyClient()
 	if err != nil {
-		return fmt.Errorf("set up client: %w", err)
+		return nil, fmt.Errorf("set up client: %w", err)
 	}
 
 	// If the domains are different, this must create a new certificate, then the renewal constraints must be skipped.
@@ -117,28 +163,53 @@ func (p *renewProcessor) renewForDomains(ctx context.Context, certID string, cha
 
 	certRes, err := client.Certificate.Obtain(ctx, request)
 	if err != nil {
-		return fmt.Errorf("could not obtain the certificate for %q: %w", certID, err)
+		return nil, fmt.Errorf("could not obtain the certificate for %q: %w", certID, err)
 	}
 
 	certRes.ID = certID
 
 	options := newSaveOptions(p.certConfig)
 
-	err = p.certsStorage.Save(
+	metadata := hook.BuildDeployMetadata(certRes, p.certsStorage, options)
+
+	generation, err := lease.NewGeneration(
 		&storage.Certificate{
 			Resource: certRes,
 			Origin:   storage.OriginConfiguration,
 		},
 		options,
+		metadata,
 	)
 	if err != nil {
-		return fmt.Errorf("could not save the resource: %w", err)
+		return nil, fmt.Errorf("could not stage the resource: %w", err)
 	}
 
-	return p.hookManager.Deploy(ctx, certRes, options)
+	err = generation.Ready(ctx, p.ocspHook)
+	if err != nil {
+		return nil, err
+	}
+
+	return generation, nil
 }
 
 func (p *renewProcessor) renewForCSR(ctx context.Context, certID string, changed bool) error {
+	lease, err := p.certsStorage.LeaseCertificate(ctx, certID)
+	if err != nil {
+		return fmt.Errorf("CSR: error while locking the certificate for %q: %w", certID, err)
+	}
+
+	defer lease.Release()
+
+	// Finalize a renewal interrupted during the previous run before doing anything else.
+	recovered, err := lease.Recover(ctx, p.deployHook)
+	if err != nil {
+		return fmt.Errorf("CSR: %w", err)
+	}
+
+	if recovered {
+		return nil
+	}
+
 	csr, err := storage.ReadCSRFile(p.certConfig.CSR)
 	if err != nil {
 		return fmt.Errorf("CSR: could not read file %q: %w", p.certConfig.CSR, err)
@@ -186,21 +257,49 @@ func (p *renewProcessor) renewForCSR(ctx context.Context, certID string, changed
 		request.ReplacesCertID = replacesCertID
 	}
 
-	err = p.hookManager.PreForCSR(ctx, certID, request)
+	csrDomains := certcrypto.ExtractDomainsCSR(csr)
+
+	// Adopt a fully staged generation instead of issuing a new certificate when possible.
+	generation, err := lease.Adopt(ctx, csrDomains, request.Profile, p.ocspHook)
 	if err != nil {
-		return fmt.Errorf("CSR: pre-renew hook: %w", err)
+		return fmt.Errorf("CSR: %w", err)
 	}
 
-	defer func() { _ = p.hookManager.Post(ctx) }()
+	if generation == nil {
+		err = p.hookManager.PreForCSR(ctx, certID, request)
+		if err != nil {
+			return fmt.Errorf("CSR: pre-renew hook: %w", err)
+		}
 
+		defer func() { _ = p.hookManager.Post(ctx) }()
+
+		generation, err = p.obtainAndStageCSR(ctx, lease, certID, request)
+		if err != nil {
+			return err
+		}
+	} else {
+		defer func() { _ = p.hookManager.Post(ctx) }()
+	}
+
+	// Promote the generation and deploy: on failure the previous certificate stays consistent.
+	return lease.Commit(ctx, generation, p.deployHook)
+}
+
+// obtainAndStageCSR obtains a new certificate for the CSR and stages a validated candidate generation.
+func (p *renewProcessor) obtainAndStageCSR(
+	ctx context.Context,
+	lease *storage.CertificateLease,
+	certID string,
+	request certificate.ObtainForCSRRequest,
+) (*storage.Generation, error) {
 	client, err := p.lazyClient()
 	if err != nil {
-		return fmt.Errorf("CSR: set up client: %w", err)
+		return nil, fmt.Errorf("CSR: set up client: %w", err)
 	}
 
 	certRes, err := client.Certificate.ObtainForCSR(ctx, request)
 	if err != nil {
-		return fmt.Errorf("CSR: could not obtain the certificate: %w", err)
+		return nil, fmt.Errorf("CSR: could not obtain the certificate: %w", err)
 	}
 
 	certRes.ID = certID
@@ -210,18 +309,46 @@ func (p *renewProcessor) renewForCSR(ctx context.Context, certID string, changed
 	// Force to disable PEM with CSR because we don't have the private key.
 	options.PEM = false
 
-	err = p.certsStorage.Save(
+	metadata := hook.BuildDeployMetadata(certRes, p.certsStorage, options)
+
+	generation, err := lease.NewGeneration(
 		&storage.Certificate{
 			Resource: certRes,
 			Origin:   storage.OriginConfiguration,
 		},
 		options,
+		metadata,
 	)
 	if err != nil {
-		return fmt.Errorf("CSR: could not save the resource: %w", err)
+		return nil, fmt.Errorf("CSR: could not stage the resource: %w", err)
 	}
 
-	return p.hookManager.Deploy(ctx, certRes, options)
+	err = generation.Ready(ctx, p.ocspHook)
+	if err != nil {
+		return nil, fmt.Errorf("CSR: %w", err)
+	}
+
+	return generation, nil
+}
+
+// deployHook is the storage.DeployFunc callback backed by the hook manager.
+func (p *renewProcessor) deployHook(ctx context.Context, certRes *certificate.Resource, metadata map[string]string) error {
+	return p.hookManager.DeployWith(ctx, certRes, metadata)
+}
+
+// ocspHook is the storage.OCSPFetcher callback backed by the ACME client.
+func (p *renewProcessor) ocspHook(ctx context.Context, bundle []byte) ([]byte, error) {
+	client, err := p.lazyClient()
+	if err != nil {
+		return nil, fmt.Errorf("set up client: %w", err)
+	}
+
+	raw, _, err := client.Certificate.GetOCSP(ctx, bundle)
+	if err != nil {
+		return nil, err
+	}
+
+	return raw, nil
 }
 
 func (p *renewProcessor) getARIInfo(ctx context.Context, certID string, cert *x509.Certificate) (*time.Time, string, error) {

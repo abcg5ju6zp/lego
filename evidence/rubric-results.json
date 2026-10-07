@@ -1,0 +1,37 @@
+[
+  {
+    "id": 1,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 2,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 3,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 4,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 5,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 6,
+    "passed": false,
+    "reason": "Renew paths install deferred Post hook with `_ = p.hookManager.Post(ctx)`, so a post-hook error is discarded instead of returned to the renewal caller."
+  },
+  {
+    "id": 7,
+    "passed": true,
+    "reason": ""
+  }
+]
